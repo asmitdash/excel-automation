@@ -6,11 +6,15 @@ import zipfile
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Town Summary Generator", layout="wide")
 
-def process_town_data(town_name, town_df):
+def process_town_data(town_name, full_df):
     """
     Generates the specific 'Azamgarh-style' summary rows for a given town.
     """
     summary_data = []
+
+    # --- CRITICAL FIX: Filter for the specific town FIRST ---
+    # Previously, this step was missing, causing it to sum up the entire state.
+    town_df = full_df[full_df['Town'] == town_name].copy()
 
     # --- ROW 1: Town Name Header ---
     summary_data.append([
@@ -33,7 +37,7 @@ def process_town_data(town_name, town_df):
     ]
     summary_data.append(sub_headers)
 
-    # Filter out NaNs from Stratification
+    # Get Stratifications present ONLY in this town
     stratifications = [x for x in town_df['Updated Stratification'].dropna().unique()]
 
     for strat in stratifications:
@@ -50,8 +54,8 @@ def process_town_data(town_name, town_df):
         tvs_pri = len(strat_df[strat_df['TVS Store Type'].astype(str).str.contains('MD|Dealer', case=False, na=False)])
         tvs_sec = len(strat_df[strat_df['TVS Store Type'].astype(str).str.contains('ASD|AD|Sub', case=False, na=False)])
         
-        # Volumes (Summing the columns from Accessibility File)
-        # Note: We cleaned column names to remove newlines, so we use the clean versions here
+        # Volumes (Summing the columns)
+        # Note: Columns are cleaned (newlines removed) in the main app block before passing here
         ind_s1 = pd.to_numeric(strat_df['S1 Ind Vistaar'], errors='coerce').sum()
         bal_s1_vol = pd.to_numeric(strat_df['BAL S1 Vol - Vistaar'], errors='coerce').sum()
         tvs_s1_vol = pd.to_numeric(strat_df['TVS S1 Vol'], errors='coerce').sum()
@@ -104,7 +108,7 @@ def process_town_data(town_name, town_df):
 
 
 # --- MAIN APP UI ---
-st.title("📊 Automator: Town Summary Generator (Fixed)")
+st.title("📊 Automator: Town Summary Generator (v2 Corrected)")
 
 uploaded_file = st.file_uploader("Upload 'Accessibility Excel' (CSV or Excel)", type=['xlsx', 'csv'])
 
@@ -119,7 +123,7 @@ if uploaded_file:
         if len(df) > 0:
             df = df.drop(0).reset_index(drop=True)
 
-        # --- CRITICAL FIX: Clean Column Names ---
+        # --- CLEANING: Fix Column Names ---
         # Replaces newlines '\n' with spaces so 'S1 Ind\nVistaar' becomes 'S1 Ind Vistaar'
         df.columns = df.columns.str.replace('\n', ' ').str.strip()
 
@@ -134,11 +138,11 @@ if uploaded_file:
             # Create a ZIP file in memory
             zip_buffer = io.BytesIO()
             
-            # --- CRITICAL FIX: Removed invalid 'false_compress' argument ---
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zip_file:
                 progress_bar = st.progress(0)
                 
                 for i, town in enumerate(unique_towns):
+                    # We pass the full clean_df here; the function now handles filtering internally
                     town_summary_df = process_town_data(town, clean_df)
                     
                     excel_buffer = io.BytesIO()
@@ -153,7 +157,7 @@ if uploaded_file:
             st.download_button(
                 label="📥 Download All Files (ZIP)",
                 data=zip_buffer.getvalue(),
-                file_name="All_Town_Summaries.zip",
+                file_name="All_Town_Summaries_Corrected.zip",
                 mime="application/zip"
             )
 
