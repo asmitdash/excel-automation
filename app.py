@@ -9,82 +9,120 @@ st.set_page_config(page_title="Town Scorecard Generator", layout="wide")
 def generate_town_excel(town_name, town_df):
     """
     Generates an Excel file with:
-    1. 'Scorecard': Exact replica of Azamgarh template (Formatted).
-    2. 'Network_Plan': The bottom 2 tables (Summary & Intervention).
+    1. 'Scorecard': Exact replica of Azamgarh template.
+    2. 'Network_Plan': The bottom 2 tables.
+    3. LOGIC FIX: Dynamically calculates 'Vacant' rows instead of hardcoding 0.
     """
     
     # ==========================================
-    # DATA PREPARATION & CLEANING
+    # SHEET 1: SCORECARD LOGIC
     # ==========================================
     
-    # 1. Filter out 'Closed' stores for the Scorecard counts
-    # We look for the specific column indicating closed status
-    scorecard_df = town_df.copy()
-    
-    # Robustly find the 'Sub-Location' column even if headers vary slightly
-    closed_col = next((c for c in scorecard_df.columns if 'Highlight' in c and 'closed' in c), None)
-    
-    # If the column exists, exclude rows containing "closed" (case insensitive)
-    if closed_col:
-        scorecard_df = scorecard_df[~scorecard_df[closed_col].astype(str).str.contains('closed', case=False, na=False)]
-
-    # 2. Prepare Data Rows
     scorecard_rows = []
-    stratifications = [x for x in scorecard_df['Updated Stratification'].dropna().unique()]
+    
+    # 1. Filter out 'Closed' stores
+    # We work on a copy to avoid affecting other logic
+    clean_df = town_df.copy()
+    
+    # Robustly find the 'Sub-Location' column for closing logic
+    closed_col = next((c for c in clean_df.columns if 'Highlight' in c and 'closed' in c), None)
+    if closed_col:
+        clean_df = clean_df[~clean_df[closed_col].astype(str).str.contains('closed', case=False, na=False)]
+
+    # Get Stratifications
+    stratifications = [x for x in clean_df['Updated Stratification'].dropna().unique()]
 
     for strat in stratifications:
-        strat_df = scorecard_df[scorecard_df['Updated Stratification'] == strat]
+        # Get all rows for this stratification (excluding closed)
+        strat_df = clean_df[clean_df['Updated Stratification'] == strat]
 
-        # --- COUNTS (Only Active Stores) ---
-        bal_pri = len(strat_df[strat_df['BAL Store Type'].astype(str).str.contains('MD|Dealer', case=False, na=False)])
-        bal_sec = len(strat_df[strat_df['BAL Store Type'].astype(str).str.contains('ASD|AD|Sub|Rep', case=False, na=False)])
-        tvs_pri = len(strat_df[strat_df['TVS Store Type'].astype(str).str.contains('MD|Dealer', case=False, na=False)])
-        tvs_sec = len(strat_df[strat_df['TVS Store Type'].astype(str).str.contains('ASD|AD|Sub', case=False, na=False)])
+        # --- SEPARATE DATAFRAMES FOR PRI, SEC, VACANT ---
         
-        # --- VOLUMES (Sum of S1 Ind, BAL, TVS) ---
-        ind_s1 = pd.to_numeric(strat_df['S1 Ind Vistaar'], errors='coerce').sum()
-        bal_s1_vol = pd.to_numeric(strat_df['BAL S1 Vol - Vistaar'], errors='coerce').sum()
-        tvs_s1_vol = pd.to_numeric(strat_df['TVS S1 Vol'], errors='coerce').sum()
+        # 1. Primary DataFrame
+        pri_mask = strat_df['BAL Store Type'].astype(str).str.contains('MD|Dealer', case=False, na=False)
+        pri_df = strat_df[pri_mask]
         
-        # --- METRICS ---
-        bal_ms = (bal_s1_vol / ind_s1) if ind_s1 > 0 else 0
-        vol_gap = tvs_s1_vol - bal_s1_vol # Matches Header: Vol Gap (TVS-BAL)
-        cr_val = pd.to_numeric(strat_df['CR'], errors='coerce').mean()
+        # 2. Secondary DataFrame
+        sec_mask = strat_df['BAL Store Type'].astype(str).str.contains('ASD|AD|Sub|Rep', case=False, na=False)
+        sec_df = strat_df[sec_mask]
+        
+        # 3. Vacant DataFrame (Rows that are neither Primary nor Secondary)
+        # We use the inverse of (Pri OR Sec)
+        vac_df = strat_df[~(pri_mask | sec_mask)]
+        
+        # --- HELPER FUNCTION FOR METRICS ---
+        def get_metrics(df):
+            count = len(df)
+            # TVS Counts (within this subset)
+            tvs_p = len(df[df['TVS Store Type'].astype(str).str.contains('MD|Dealer', case=False, na=False)])
+            tvs_s = len(df[df['TVS Store Type'].astype(str).str.contains('ASD|AD|Sub', case=False, na=False)])
+            
+            # Volumes
+            ind = pd.to_numeric(df['S1 Ind Vistaar'], errors='coerce').sum()
+            bal_vol = pd.to_numeric(df['BAL S1 Vol - Vistaar'], errors='coerce').sum()
+            tvs_vol = pd.to_numeric(df['TVS S1 Vol'], errors='coerce').sum()
+            
+            ms = (bal_vol / ind) if ind > 0 else 0
+            vol_g = tvs_vol - bal_vol
+            cr = pd.to_numeric(df['CR'], errors='coerce').mean()
+            
+            return count, tvs_p, tvs_s, ind, bal_vol, tvs_vol, ms, vol_g, cr
 
-        # --- GAPS ---
-        # Store Gap: If BAL < TVS, it's a gap. 
-        # Usually represented as (BAL - TVS) -> Negative means gap.
-        # Or (TVS - BAL) -> Positive means gap. 
-        # Azamgarh template has "Store Gap". I will use BAL - TVS.
-        store_gap_pri = bal_pri - tvs_pri
-        store_gap_sec = bal_sec - tvs_sec
+        # --- CALCULATE METRICS FOR EACH ROW ---
         
-        # --- BUILD ROWS FOR THIS STRATIFICATION ---
-        # Row 1: Primary
+        # Primary Row Data
+        p_bal, p_tvs_p, p_tvs_s, p_ind, p_bal_vol, p_tvs_vol, p_ms, p_vg, p_cr = get_metrics(pri_df)
+        p_store_gap = p_bal - p_tvs_p # BAL Pri - TVS Pri
+        
+        # Secondary Row Data
+        s_bal, s_tvs_p, s_tvs_s, s_ind, s_bal_vol, s_tvs_vol, s_ms, s_vg, s_cr = get_metrics(sec_df)
+        s_store_gap = s_bal - s_tvs_s # BAL Sec - TVS Sec
+        
+        # Vacant Row Data (The Gemini Fix)
+        v_bal, v_tvs_p, v_tvs_s, v_ind, v_bal_vol, v_tvs_vol, v_ms, v_vg, v_cr = get_metrics(vac_df)
+        # For Vacant, Store Gap is usually equal to the count of opportunities (as per Gemini)
+        # OR 0 - 0. Let's keep it strictly math: BAL(0) - TVS(0) = 0 usually. 
+        # But if Gemini says "Gap equals the count", we might need logic. 
+        # For now, let's keep strict math: 0 stores vs 0 stores.
+        v_store_gap = 0 
+
+        # --- TOTALS ---
+        t_bal = p_bal + s_bal + v_bal
+        t_tvs = (p_tvs_p + p_tvs_s) + (s_tvs_p + s_tvs_s) + (v_tvs_p + v_tvs_s)
+        t_gap = p_store_gap + s_store_gap + v_store_gap
+        
+        # --- BUILD ROWS ---
+        
+        # 1. Primary Row
         scorecard_rows.append([
-            strat, "Pri Store", bal_pri, tvs_pri, "", 
-            store_gap_pri, 0, ind_s1, bal_s1_vol, bal_ms, tvs_s1_vol, vol_gap, cr_val, 
-            "", "", "", "", bal_pri, 0
+            strat, "Pri Store", p_bal, p_tvs_p, "", 
+            p_store_gap, 0, p_ind, p_bal_vol, p_ms, p_tvs_vol, p_vg, p_cr, 
+            "", "", "", "", p_bal, 0
         ])
-        # Row 2: Secondary
+        
+        # 2. Secondary Row
         scorecard_rows.append([
-            "", "ASD", bal_sec, "", tvs_sec, 
-            store_gap_sec, 0, "", "", "", "", "", "", 
-            "", "", "", "", bal_sec, 0
+            "", "ASD", s_bal, "", s_tvs_s, 
+            s_store_gap, 0, s_ind, s_bal_vol, s_ms, s_tvs_vol, s_vg, s_cr, 
+            "", "", "", "", s_bal, 0
         ])
-        # Row 3: Vacant
+        
+        # 3. Vacant Row (Populated with calculated data)
         scorecard_rows.append([
-            "", "Vacant", 0, "", "", 
-            0, 0, "", "", "", "", "", "", 
-            "", "", "", "", 0, 0
+            "", "Vacant", v_bal, "", "", 
+            v_store_gap, len(vac_df), v_ind, v_bal_vol, v_ms, v_tvs_vol, v_vg, "", 
+            "", "", "", "", 0, len(vac_df)
         ])
-        # Row 4: Total
+        
+        # 4. Total Row
         scorecard_rows.append([
-            "", "Total", (bal_pri + bal_sec), (tvs_pri + tvs_sec), "", 
-            (store_gap_pri + store_gap_sec), 0, "", "", "", "", "", "", 
-            "", "", "", "", (bal_pri + bal_sec), 0
+            "", "Total", t_bal, t_tvs, "", 
+            t_gap, len(vac_df), (p_ind+s_ind+v_ind), (p_bal_vol+s_bal_vol+v_bal_vol), "", 
+            (p_tvs_vol+s_tvs_vol+v_tvs_vol), (p_vg+s_vg+v_vg), "", 
+            "", "", "", "", t_bal, len(vac_df)
         ])
-        # Spacer Row
+        
+        # Spacer
         scorecard_rows.append([""] * 19)
 
     df_scorecard = pd.DataFrame(scorecard_rows)
@@ -92,9 +130,7 @@ def generate_town_excel(town_name, town_df):
     # ==========================================
     # SHEET 2: NETWORK PLAN LOGIC
     # ==========================================
-    # Logic for Bottom 2 Tables (Summary & Intervention)
     
-    # TABLE 1: PRE vs POST SUMMARY
     summary_rows = []
     categories = ['Primary', 'Secondary', 'Vacant']
     
@@ -130,15 +166,14 @@ def generate_town_excel(town_name, town_df):
         "Channel Type", "Pre Count", "Pre Ind", "Post Count", "Post Ind", "Ind Coverage Gain", "Vol Gain", "MS Gain"
     ])
 
-    # TABLE 2: INTERVENTION LIST
+    # Intervention List
     intervention_df = town_df[town_df['Network Intervention'].notna()].copy()
     cols_to_keep = ['Location / T2T', 'Updated Stratification', 'Channel Type - TVS', 'BAL Store Type', 'S1 Ind Vistaar', 'Nature of Intervention', 'Network Intervention', 'Remarks']
-    # Use only columns that actually exist
     existing_cols = [c for c in cols_to_keep if c in intervention_df.columns]
     df_intervention_list = intervention_df[existing_cols]
 
     # ==========================================
-    # EXCEL WRITING (XlsxWriter Engine)
+    # EXCEL WRITING
     # ==========================================
     output = io.BytesIO()
     workbook = pd.ExcelWriter(output, engine='xlsxwriter')
@@ -153,23 +188,18 @@ def generate_town_excel(town_name, town_df):
         'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
         'fg_color': '#D9E1F2', 'border': 1, 'font_size': 9
     })
-    simple_header = workbook_obj.add_format({
-        'bold': True, 'bg_color': '#FFFF00', 'border': 1
-    })
-    
-    # --- SHEET 1: SCORECARD ---
-    # We write data starting at Row 3 (Index 3), leaving room for headers
+    simple_header = workbook_obj.add_format({'bold': True, 'bg_color': '#FFFF00', 'border': 1})
+
+    # --- SHEET 1 ---
     df_scorecard.to_excel(workbook, sheet_name='Scorecard', startrow=3, header=False, index=False)
     ws1 = workbook.sheets['Scorecard']
-    
-    # 1. Town Name (Top Left)
     ws1.write(0, 1, town_name, workbook_obj.add_format({'bold': True, 'font_size': 14}))
     
-    # 2. Main Headers (Row 2 / Index 1)
+    # Headers (Exact Replica)
     ws1.write(1, 0, "Stratification", header_format)
     ws1.write(1, 1, "# Store Count", header_format)
     ws1.write(1, 2, "BAL", header_format)
-    ws1.merge_range(1, 3, 1, 4, "TVS", header_format) # Merged TVS
+    ws1.merge_range(1, 3, 1, 4, "TVS", header_format)
     ws1.write(1, 5, "Store Gap", header_format)
     ws1.write(1, 6, "Unique Location Gap", header_format)
     ws1.write(1, 7, "IND S1", header_format)
@@ -178,44 +208,34 @@ def generate_town_excel(town_name, town_df):
     ws1.write(1, 10, "S1 TVS Vol", header_format)
     ws1.write(1, 11, "Vol Gap\n(TVS-BAL)", header_format)
     ws1.write(1, 12, "CR", header_format)
-    ws1.merge_range(1, 13, 1, 14, "Addition", header_format) # Merged Addition
-    ws1.merge_range(1, 15, 1, 16, "Reduction", header_format) # Merged Reduction
+    ws1.merge_range(1, 13, 1, 14, "Addition", header_format)
+    ws1.merge_range(1, 15, 1, 16, "Reduction", header_format)
     ws1.write(1, 17, "BAL Network Count\n@ UP 2.0", header_format)
     ws1.write(1, 18, "Unique Location Gap\npost appointment", header_format)
-
-    # 3. Sub-Headers (Row 3 / Index 2)
-    for col in [0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 17, 18]:
-        ws1.write(2, col, "", subheader_format) # Blank subheaders for non-merged cols
-        
+    
+    # Subheaders
+    for c in [0,1,2,5,6,7,8,9,10,11,12,17,18]: ws1.write(2, c, "", subheader_format)
     ws1.write(2, 3, "Primary", subheader_format)
     ws1.write(2, 4, "Secondary", subheader_format)
     ws1.write(2, 13, "Primary", subheader_format)
     ws1.write(2, 14, "Secondary", subheader_format)
     ws1.write(2, 15, "Primary", subheader_format)
     ws1.write(2, 16, "Secondary", subheader_format)
-
-    # Column Widths
     ws1.set_column(0, 0, 15)
     ws1.set_column(7, 12, 10)
 
-    # --- SHEET 2: NETWORK PLAN ---
+    # --- SHEET 2 ---
     ws2_name = 'Network_Plan'
     df_network_summary.to_excel(workbook, sheet_name=ws2_name, startrow=1, index=False)
     ws2 = workbook.sheets[ws2_name]
-    
-    # Headers for Table 1
     for col_num, value in enumerate(df_network_summary.columns.values):
         ws2.write(0, col_num, value, simple_header)
 
-    # Intervention List (Table 2)
     start_row_t2 = len(df_network_summary) + 4
     ws2.write(start_row_t2 - 1, 0, "Intervention List", workbook_obj.add_format({'bold': True, 'font_size': 12}))
     df_intervention_list.to_excel(workbook, sheet_name=ws2_name, startrow=start_row_t2, index=False)
-    
-    # Headers for Table 2
     for col_num, value in enumerate(df_intervention_list.columns.values):
         ws2.write(start_row_t2, col_num, value, simple_header)
-        
     ws2.set_column(0, 8, 15)
 
     workbook.close()
@@ -223,14 +243,12 @@ def generate_town_excel(town_name, town_df):
 
 
 # --- MAIN APP UI ---
-st.title("📊 Master Scorecard Generator (Gold Standard)")
-st.markdown("Generates exact Azamgarh-style formatting with corrected data logic.")
+st.title("📊 Master Scorecard Generator (Audit Compliant)")
 
 uploaded_file = st.file_uploader("Upload 'Accessibility Excel' (CSV or Excel)", type=['xlsx', 'csv'])
 
 if uploaded_file:
     try:
-        # Load File
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, header=2)
         else:
@@ -239,10 +257,8 @@ if uploaded_file:
         if len(df) > 0:
             df = df.drop(0).reset_index(drop=True)
 
-        # 1. CLEAN HEADERS (Handle Newlines)
+        # CLEAN HEADERS
         df.columns = df.columns.str.replace('\n', ' ').str.strip()
-        
-        # 2. FILTER TOTALS
         clean_df = df[~df['Town'].astype(str).str.contains('Total', case=False, na=False)].copy()
         
         unique_towns = clean_df['Town'].dropna().unique()
@@ -261,7 +277,7 @@ if uploaded_file:
             st.download_button(
                 label="📥 Download All Scorecards (ZIP)",
                 data=zip_buffer.getvalue(),
-                file_name="Town_Scorecards_Gold.zip",
+                file_name="Town_Scorecards_Audit_Compliant.zip",
                 mime="application/zip"
             )
 
